@@ -1,0 +1,665 @@
+const fs = require('fs');
+const path = require('path');
+const moment = require('moment-timezone');
+const cron = require('node-cron');
+const crypto = require('crypto');
+const fsExtra = require('fs-extra'); // Thêm fs-extra để đồng bộ
+
+// --- Cấu hình chung ---
+const RENT_DATA_PATH = path.join(__dirname, 'cache/data/thuebot.json');
+const TIMEZONE = 'Asia/Ho_Chi_Minh';
+
+// Đảm bảo thư mục cache/data tồn tại
+fsExtra.ensureDirSync(path.dirname(RENT_DATA_PATH));
+
+let data = fs.existsSync(RENT_DATA_PATH) ? JSON.parse(fs.readFileSync(RENT_DATA_PATH, 'utf8')) : [];
+const saveData = () => fs.writeFileSync(RENT_DATA_PATH, JSON.stringify(data, null, 2), 'utf8');
+
+const isValidDate = dateString => {
+    const d = moment(dateString, 'DD/MM/YYYY', true);
+    return d.isValid();
+};
+
+async function streamURL(url, ext = 'jpg') {
+    const tempFilePath = path.join(__dirname, 'cache', `${Date.now()}.${ext}`);
+    const imageDownloader = require('image-downloader'); // Khai báo cục bộ
+
+    try {
+        await imageDownloader.image({ 'url': url, 'dest': tempFilePath });
+        setTimeout(() => fsExtra.unlink(tempFilePath).catch(e => console.error("⚠️ Lỗi xóa file ảnh tạm:", e)), 60 * 1000); // Thêm icon
+        return fsExtra.createReadStream(tempFilePath);
+    } catch (error) {
+        console.error("⚠️ Lỗi tải ảnh từ URL:", error); // Thêm icon
+        return null;
+    }
+};
+
+// Cập nhật hàm tạo key theo yêu cầu mới của mày
+const generateRandomKey = (length = 8) => {
+    // Bao gồm chữ thường, chữ in hoa và số
+    const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'; 
+    let result = '';
+    for (let i = 0; i < length; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+};
+
+// Cấu hình của lệnh "rent"
+module.exports.config = {
+    name: "rent",
+    version: "1.8.2", // Tăng version vì có cập nhật logic tạo key
+    hasPermssion: 2, // Chỉ Admin bot mới dùng được, permssion 3 là bot owner
+    credits: "Lương Trường Khôi (mod by qh và Gemini) 👑", // Thêm credit của mày và tao
+    description: "🔑 Quản lý thuê bot, tạo key, xem thông tin và danh sách. ", // Mô tả ngắn gọn, có icon
+    commandCategory: "ADMIN",
+    usePrefix: false,
+    usages: "[newkey <số ngày> | add <TID> <UID> <DD/MM/YYYY> | info | list | checkkey <key> | removekey <TID/key> | extend <TID> <DD/MM/YYYY mới> | delete <TID/key>]", // Cập nhật usages
+    cooldowns: 3 // Tăng cooldown
+};
+
+// --- Hàm chính xử lý lệnh "rent" ---
+module.exports.run = async function({ api, event, args, permssion }) {
+    const { threadID, messageID, senderID } = event;
+    const sendMessage = (msg, callback) => api.sendMessage(msg, threadID, callback, messageID);
+    const botPrefix = global.config.PREFIX;
+
+    // Kiểm tra quyền Admin
+    if (!global.config.ADMINBOT.includes(senderID)) {
+        return sendMessage('🚫 Bạn không phải là Admin chính để sử dụng lệnh này!');
+    }
+
+    const command = args[0]?.toLowerCase();
+    const rentData = data;
+
+    try { // Thêm try-catch để bắt lỗi
+        switch (command) {
+            case "newkey": {
+                if (!args[1]) {
+                    return sendMessage(`⚠️ Sai cú pháp! Vui lòng nhập số ngày thuê.\nVí dụ: \`${botPrefix}${this.config.name} newkey 30\` (tạo key 30 ngày).`);
+                }
+
+                const rentalDays = parseInt(args[1]);
+                if (isNaN(rentalDays) || rentalDays <= 0) {
+                    return sendMessage('❎ Số ngày thuê không hợp lệ! Vui lòng nhập một số nguyên dương.');
+                }
+
+                // Tạo key theo định dạng mới: qh-[8 ký tự ngẫu nhiên bao gồm số, chữ thường, chữ in hoa]
+                const generatedKey = `qh-${generateRandomKey()}`; 
+                const timeEnd = moment().tz(TIMEZONE).add(rentalDays, 'days').format('DD/MM/YYYY');
+
+                const message =
+                    `✨ **KEY THUÊ BOT CỦA BẠN ĐÂY!** ✨\n` +
+                    `──────────────────\n` +
+                    `🔑 **Key:** \`${generatedKey}\`\n` +
+                    `⏳ **Hạn sử dụng:** ${rentalDays} ngày, hết hạn vào ${timeEnd}.\n` +
+                    `📌 **Hướng dẫn:** Để kích hoạt, hãy chat **chính xác** key \`${generatedKey}\` vào nhóm này.\n` +
+                    `──────────────────\n` +
+                    `💡 Lưu ý: Key này chỉ có hiệu lực cho nhóm này và cần được kích hoạt trước khi hết hạn. `;
+
+                api.sendMessage(message, threadID, (error, info) => {
+                    if (!error) {
+                        global.client.handleReply.push({
+                            name: this.config.name,
+                            messageID: info.messageID,
+                            author: senderID,
+                            type: 'newkey_confirm',
+                            threadID: threadID,
+                            generatedKey: generatedKey,
+                            timeEnd: timeEnd
+                        });
+                    } else {
+                        console.error("⚠️ Lỗi khi gửi tin nhắn tạo key:", error);
+                        sendMessage("❌ Đã xảy ra lỗi khi tạo key. Vui lòng thử lại!");
+                    }
+                }, messageID);
+                break;
+            }
+
+            case "add": {
+                if (!args[1] || !args[2] || !args[3]) {
+                    return sendMessage(`⚠️ Cú pháp không đúng!\nCách dùng: \`${botPrefix}${this.config.name} add <TID nhóm> <UID người thuê> <DD/MM/YYYY hết hạn>\`\nVí dụ: \`${botPrefix}${this.config.name} add ${threadID} ${senderID} 31/12/2025\`. `);
+                }
+                const targetThreadID = args[1];
+                const targetUserID = args[2];
+                const timeEnd = args[3];
+
+                if (isNaN(targetThreadID) || isNaN(targetUserID) || !isValidDate(timeEnd)) {
+                    return sendMessage('❎ ID nhóm, ID người thuê hoặc Ngày Hết Hạn Không Hợp Lệ! (Định dạng ngày DD/MM/YYYY). ');
+                }
+                const timeStart = moment.tz(TIMEZONE).format('DD/MM/YYYY');
+                const existingEntryIndex = rentData.findIndex(entry => entry.t_id === targetThreadID);
+
+                let message = '';
+                if (existingEntryIndex !== -1) {
+                    Object.assign(rentData[existingEntryIndex], {
+                        'id': targetUserID,
+                        'time_start': timeStart,
+                        'time_end': timeEnd
+                    });
+                    message = `✅ Đã gia hạn dữ liệu thuê bot cho nhóm **${targetThreadID}** thành công! `;
+                } else {
+                    rentData.push({
+                        't_id': targetThreadID,
+                        'id': targetUserID,
+                        'time_start': timeStart,
+                        'time_end': timeEnd,
+                        'key': null // Mặc định không có key nếu thêm thủ công
+                    });
+                    message = `✅ Đã thêm dữ liệu thuê bot cho nhóm **${targetThreadID}** thành công! `;
+                }
+                sendMessage(message);
+                break;
+            }
+
+            case "info": {
+                const currentThreadData = rentData.find(entry => entry.t_id === threadID);
+                if (!currentThreadData) {
+                    return sendMessage('❎ Nhóm này chưa có dữ liệu thuê bot. Vui lòng liên hệ Admin để thuê! ');
+                }
+
+                const timeEndMoment = moment(currentThreadData.time_end, 'DD/MM/YYYY');
+                const nowMoment = moment().tz(TIMEZONE);
+
+                if (timeEndMoment.isBefore(nowMoment, 'day')) {
+                    // Xóa dữ liệu thuê nếu đã hết hạn
+                    data = data.filter(entry => entry.t_id !== threadID);
+                    saveData();
+                    return sendMessage('⚠️ Dữ liệu thuê bot của nhóm bạn đã hết hạn và đã được gỡ bỏ. Vui lòng liên hệ Admin để gia hạn! ');
+                }
+
+                const duration = moment.duration(timeEndMoment.diff(nowMoment));
+                const daysLeft = duration.days();
+                const hoursLeft = duration.hours();
+                const minutesLeft = duration.minutes();
+
+                const userName = global.data.userName.get(currentThreadData.id) || (await api.getUserInfo(currentThreadData.id))[currentThreadData.id]?.name || `UID: ${currentThreadData.id}`;
+                
+                let userAvatar;
+                try {
+                    userAvatar = await streamURL(`https://graph.facebook.com/${currentThreadData.id}/picture?height=720&width=720&access_token=6628568379%7Cc1e620fa708a1d5696fb991c1bde5662`);
+                } catch (e) {
+                    console.error("⚠️ Lỗi khi tải avatar người thuê:", e);
+                    userAvatar = null;
+                }
+
+                sendMessage({
+                    body: `✨ **THÔNG TIN THUÊ BOT CỦA NHÓM** ✨\n` +
+                          `──────────────────\n` +
+                          `👤 **Người thuê:** ${userName}\n` +
+                          `🗓️ **Ngày thuê:** ${currentThreadData.time_start}\n` +
+                          `⏳ **Hết hạn:** ${currentThreadData.time_end}\n` +
+                          `🔑 **Key hiện tại:** ${currentThreadData.key || 'Chưa có'}\n` +
+                          `──────────────────\n` +
+                          `⏰ Còn **${daysLeft} ngày ${hoursLeft} giờ ${minutesLeft} phút** nữa là hết hạn. `,
+                    attachment: userAvatar ? [userAvatar] : []
+                });
+                break;
+            }
+
+            case "list": {
+                if (rentData.length === 0) {
+                    return sendMessage('❎ Hiện không có nhóm nào đang thuê bot! ');
+                }
+                let listMessageBody = `📋 **DANH SÁCH NHÓM ĐANG THUÊ BOT** 📋\n\n`;
+
+                for (let i = 0; i < rentData.length; i++) {
+                    const entry = rentData[i];
+                    const timeEndMoment = moment(entry.time_end, 'DD/MM/YYYY');
+                    const nowMoment = moment().tz(TIMEZONE);
+                    const isExpired = timeEndMoment.isBefore(nowMoment, 'day');
+
+                    const duration = moment.duration(timeEndMoment.diff(nowMoment));
+                    const daysLeft = duration.days();
+                    const hoursLeft = duration.hours();
+                    const status = isExpired ? 'Đã Hết Hạn ❌' : 'Còn Hạn ✅';
+
+                    const threadName = global.data.threadName.get(entry.t_id) || (await api.getThreadInfo(entry.t_id).then(t => t.threadName).catch(() => `TID: ${entry.t_id}`));
+                    const userName = global.data.userName.get(entry.id) || (await api.getUserInfo(entry.id).then(u => u[entry.id]?.name).catch(() => `UID: ${entry.id}`));
+
+                    listMessageBody += `──────────────────\n` +
+                                       `👉 **${i + 1}. Nhóm:** ${threadName}\n` +
+                                       `👤 **Người thuê:** ${userName}\n` +
+                                       `🗓️ **Ngày thuê:** ${entry.time_start}\n` +
+                                       `⏳ **Hết hạn:** ${entry.time_end}\n` +
+                                       `📝 **Tình trạng:** ${status}\n` +
+                                       `⏰ **Còn lại:** ${isExpired ? 'Đã hết hạn' : `${daysLeft} ngày ${hoursLeft} giờ`}\n` +
+                                       `🔑 **Key:** ${entry.key || 'Chưa có'}\n` +
+                                       `🔗 **TID:** ${entry.t_id}\n`;
+                }
+
+                listMessageBody += `──────────────────\n` +
+                                   `👉 Reply **\`del <STT>\`** để xóa nhóm.\n` +
+                                   `👉 Reply **\`out <STT>\`** để bot out nhóm.\n` +
+                                   `👉 Reply **\`giahan <STT> <DD/MM/YYYY mới>\`** để gia hạn thuê.\n` +
+                                   `👉 Reply **\`removekey <STT>\`** để xóa key của nhóm. `;
+
+                sendMessage({ body: listMessageBody }, (error, info) => {
+                    if (!error) {
+                        global.client.handleReply.push({
+                            ...info,
+                            name: this.config.name,
+                            type: 'list_manage',
+                            data: rentData // Truyền toàn bộ data để handleReply cập nhật trực tiếp
+                        });
+                    } else {
+                        console.error("⚠️ Lỗi khi gửi danh sách:", error);
+                        sendMessage("❌ Đã xảy ra lỗi khi tạo danh sách. ");
+                    }
+                });
+                break;
+            }
+
+            case "key": {
+                return sendMessage(`⚠️ Lệnh **\`key\`** đã được thay thế bằng **\`newkey\`** với cơ chế mới.\nVui lòng sử dụng: \`${botPrefix}${this.config.name} newkey <số ngày>\`. `);
+            }
+
+            case "checkkey": {
+                if (!args[1]) {
+                    return sendMessage(`⚠️ Vui lòng nhập key cần kiểm tra.\nCách dùng: \`${botPrefix}${this.config.name} checkkey <key_thuê>\`. `);
+                }
+                const inputKey = args[1].toLowerCase();
+
+                const foundEntry = rentData.find(entry => entry.key?.toLowerCase() === inputKey);
+
+                if (!foundEntry) {
+                    return sendMessage(`❎ Không tìm thấy nhóm nào với key: \`${inputKey}\`. `);
+                }
+
+                const timeEndMoment = moment(foundEntry.time_end, 'DD/MM/YYYY');
+                const nowMoment = moment().tz(TIMEZONE);
+                const isExpired = timeEndMoment.isBefore(nowMoment, 'day');
+
+                const duration = moment.duration(timeEndMoment.diff(nowMoment));
+                const daysLeft = duration.days();
+                const hoursLeft = duration.hours();
+                const minutesLeft = duration.minutes();
+                const status = isExpired ? 'Đã Hết Hạn ❌' : 'Còn Hạn ✅';
+
+                const threadName = global.data.threadName.get(foundEntry.t_id) || (await api.getThreadInfo(foundEntry.t_id).then(t => t.threadName).catch(() => `TID: ${foundEntry.t_id}`));
+                const userName = global.data.userName.get(foundEntry.id) || (await api.getUserInfo(foundEntry.id).then(u => u[foundEntry.id]?.name).catch(() => `UID: ${foundEntry.id}`));
+
+                let userAvatar;
+                try {
+                    userAvatar = await streamURL(`https://graph.facebook.com/${foundEntry.id}/picture?height=720&width=720&access_token=6628568379%7Cc1e620fa708a1d5696fb991c1bde5662`);
+                } catch (e) {
+                    console.error("⚠️ Lỗi khi tải avatar người thuê:", e);
+                    userAvatar = null;
+                }
+
+                sendMessage({
+                    body: `✨ **THÔNG TIN NHÓM THEO KEY** ✨\n` +
+                          `──────────────────\n` +
+                          `👉 **Nhóm:** ${threadName}\n` +
+                          `👤 **Người thuê:** ${userName}\n` +
+                          `🗓️ **Ngày thuê:** ${foundEntry.time_start}\n` +
+                          `⏳ **Hết hạn:** ${foundEntry.time_end}\n` +
+                          `📝 **Tình trạng:** ${status}\n` +
+                          `⏰ **Còn lại:** ${isExpired ? 'Đã hết hạn' : `${daysLeft} ngày ${hoursLeft} giờ ${minutesLeft} phút`}\n` +
+                          `🔑 **Key:** ${foundEntry.key}\n` +
+                          `🔗 **TID:** ${foundEntry.t_id}`,
+                    attachment: userAvatar ? [userAvatar] : []
+                });
+                break;
+            }
+
+            case "removekey": {
+                if (!args[1]) {
+                    return sendMessage(`⚠️ Vui lòng nhập TID hoặc key của nhóm cần xóa key.\nCách dùng: \`${botPrefix}${this.config.name} removekey <TID_hoặc_key>\`. `);
+                }
+                const inputIdentifier = args[1].toLowerCase();
+
+                const entryIndex = rentData.findIndex(entry => entry.t_id === inputIdentifier || entry.key?.toLowerCase() === inputIdentifier);
+
+                if (entryIndex === -1) {
+                    return sendMessage(`❎ Không tìm thấy nhóm nào với TID/Key: \`${inputIdentifier}\`. `);
+                }
+
+                rentData[entryIndex].key = null;
+                sendMessage(`✅ Đã xóa key thuê bot của nhóm **${rentData[entryIndex].t_id}** thành công! `);
+                break;
+            }
+
+            case "delete": {
+                if (!args[1]) {
+                    return sendMessage(`⚠️ Vui lòng nhập TID hoặc key của nhóm cần xóa dữ liệu.\nCách dùng: \`${botPrefix}${this.config.name} delete <TID_hoặc_key>\`. `);
+                }
+                const inputIdentifier = args[1].toLowerCase();
+
+                const entryIndex = rentData.findIndex(entry => entry.t_id === inputIdentifier || entry.key?.toLowerCase() === inputIdentifier);
+
+                if (entryIndex === -1) {
+                    return sendMessage(`❎ Không tìm thấy nhóm nào với TID/Key: \`${inputIdentifier}\`. `);
+                }
+
+                const deletedEntry = rentData.splice(entryIndex, 1);
+                sendMessage(`✅ Đã xóa hoàn toàn dữ liệu thuê bot của nhóm **${deletedEntry[0].t_id}** thành công! `);
+                break;
+            }
+
+            case "extend": {
+                if (!args[1] || isNaN(args[1]) || !args[2] || !isValidDate(args[2])) {
+                    return sendMessage(`⚠️ Cú pháp không đúng!\nCách dùng: \`${botPrefix}${this.config.name} extend <TID nhóm> <DD/MM/YYYY hết hạn mới>\`\nVí dụ: \`${botPrefix}${this.config.name} extend ${threadID} 31/12/2026\`. `);
+                }
+                const targetThreadID = args[1];
+                const newTimeEnd = args[2];
+
+                const entryIndex = rentData.findIndex(entry => entry.t_id === targetThreadID);
+
+                if (entryIndex === -1) {
+                    return sendMessage(`❎ Nhóm với TID **${targetThreadID}** chưa có dữ liệu thuê bot để gia hạn. Vui lòng dùng lệnh **\`${botPrefix}${this.config.name} add\`** hoặc **\`newkey\`** trước. `);
+                }
+
+                rentData[entryIndex].time_end = newTimeEnd;
+                // Thời gian bắt đầu sẽ không thay đổi khi gia hạn, chỉ cập nhật time_end
+                // rentData[entryIndex].time_start = moment.tz(TIMEZONE).format('DD/MM/YYYY'); 
+
+                sendMessage(`✅ Đã gia hạn thuê bot cho nhóm **${targetThreadID}** đến **${newTimeEnd}** thành công! `);
+                break;
+            }
+
+            default:
+                sendMessage({
+                    body: `✨ **HƯỚNG DẪN LỆNH RENT** ✨\n` +
+                          `──────────────────\n` +
+                          `👉 \`${botPrefix}rent newkey <số ngày>\`: Tạo key thuê bot theo số ngày (ví dụ: 30 ngày).\n` +
+                          `👉 \`${botPrefix}rent add <TID> <UID người thuê> <DD/MM/YYYY>: Thêm/gia hạn nhóm thủ công.\n` +
+                          `👉 \`${botPrefix}rent info\`: Xem thông tin thuê bot của nhóm hiện tại.\n` +
+                          `👉 \`${botPrefix}rent list\`: Xem danh sách các nhóm đang thuê bot.\n` +
+                          `👉 \`${botPrefix}rent checkkey <key>\`: Kiểm tra thông tin nhóm bằng key.\n` +
+                          `👉 \`${botPrefix}rent removekey <TID_hoặc_key>\`: Xóa key của nhóm.\n` +
+                          `👉 \`${botPrefix}rent extend <TID> <DD/MM/YYYY mới>\`: Gia hạn thời gian thuê bot.\n` +
+                          `👉 \`${botPrefix}rent delete <TID_hoặc_key>\`: Xóa hoàn toàn dữ liệu thuê bot của nhóm.\n` +
+                          `──────────────────\n` +
+                          `💡 **Lưu ý:** Các lệnh này chỉ Admin bot mới dùng được! `
+                });
+                break;
+        }
+    } catch (e) {
+        console.error("⚠️ Lỗi trong lệnh rent:", e);
+        sendMessage("❌ Đã xảy ra sự cố không mong muốn. Vui lòng thử lại sau! ");
+    }
+    saveData(); // Lưu dữ liệu sau mỗi thao tác
+};
+
+// --- Hàm xử lý khi có người dùng reply hoặc chat key để xác nhận ---
+module.exports.handleEvent = async function({ api, event }) {
+    const { threadID, messageID, senderID, body } = event;
+
+    // Check if there's an active handleReply for newkey confirmation in this thread
+    const activeReply = global.client.handleReply.find(
+        reply => reply.name === this.config.name &&
+                 reply.type === 'newkey_confirm' &&
+                 reply.threadID === threadID &&
+                 reply.author === senderID // Chỉ người tạo key (admin) mới có thể xác nhận
+    );
+
+    if (activeReply) {
+        const { generatedKey, timeEnd } = activeReply;
+
+        // Nếu người dùng chat đúng key được tạo
+        if (body?.toLowerCase() === generatedKey.toLowerCase()) {
+            // Xóa handleReply để tránh xử lý trùng lặp
+            global.client.handleReply = global.client.handleReply.filter(
+                reply => !(reply.messageID === activeReply.messageID && reply.threadID === activeReply.threadID)
+            );
+
+            // Kiểm tra xem nhóm đã có dữ liệu thuê bot VÀ còn hạn không
+            const existingEntry = data.find(entry => entry.t_id === threadID);
+            if (existingEntry) {
+                const existingTimeEndMoment = moment(existingEntry.time_end, 'DD/MM/YYYY');
+                const nowMoment = moment().tz(TIMEZONE);
+                if (existingTimeEndMoment.isAfter(nowMoment, 'day')) {
+                    return api.sendMessage('🚫 Nhóm này đã được kích hoạt thuê bot và vẫn còn hạn. Không thể kích hoạt key mới lúc này! ', threadID, messageID);
+                } else {
+                    // Nếu đã có nhưng hết hạn, sẽ cập nhật lại
+                    // Xóa mục cũ nếu đã hết hạn để thay thế bằng mục mới
+                    data = data.filter(entry => entry.t_id !== threadID);
+                }
+            }
+
+            const timeStart = moment.tz(TIMEZONE).format('DD/MM/YYYY');
+            data.push({
+                't_id': threadID,
+                'id': senderID,
+                'time_start': timeStart,
+                'time_end': timeEnd,
+                'key': generatedKey
+            });
+            saveData();
+
+            api.sendMessage(`✅ Chúc mừng! Nhóm của bạn đã được kích hoạt thuê bot thành công với key: **${generatedKey}**!\n🗓️ Hạn dùng đến ngày **${timeEnd}**. `, threadID, messageID);
+
+            // Thông báo tới Admin
+            const adminID = global.config.ADMINBOT[0]; // Giả sử lấy admin đầu tiên
+            if (adminID && adminID !== senderID) { // Không thông báo cho chính admin vừa kích hoạt nếu là adminbot
+                const threadInfo = await api.getThreadInfo(threadID);
+                const senderInfo = await api.getUserInfo(senderID);
+                api.sendMessage(
+                    `🔔 **Thông báo từ Bot:**\n\n` +
+                    `⏰ **Thời gian:** ${moment().tz(TIMEZONE).format("DD/MM/YYYY HH:mm:ss")}\n` +
+                    `👤 **Người kích hoạt:** ${senderInfo[senderID]?.name || `UID: ${senderID}`}\n` +
+                    `🏘️ **Nhóm:** ${threadInfo.threadName || `TID: ${threadID}`}\n` +
+                    `🔑 **Key:** ${generatedKey}\n` +
+                    `🗓️ **Hết hạn:** ${timeEnd}`,
+                    adminID
+                );
+            }
+            return;
+        } else if (body && body.toLowerCase().includes(generatedKey.toLowerCase().split('-')[1])) {
+            // Tin nhắn nhẹ nhàng hơn, không báo lỗi cứng
+            api.sendMessage('⚠️ Key không chính xác. Vui lòng chat lại **chính xác** key đã cấp để kích hoạt!', threadID, messageID);
+        }
+    }
+
+    // Call handleReply cho các action khác (del, out, giahan, removekey)
+    if (event.type === 'message_reply' && global.client.handleReply.length > 0) {
+        const replyContext = global.client.handleReply.find(
+            reply => reply.messageID === event.messageReply.messageID &&
+                     reply.name === this.config.name &&
+                     reply.type === 'list_manage'
+        );
+        if (replyContext) {
+            // Đảm bảo chỉ admin mới có thể reply các lệnh quản lý
+            if (!global.config.ADMINBOT.includes(senderID)) {
+                return api.sendMessage('🚫 Bạn không đủ quyền để thực hiện hành động này!', threadID, messageID);
+            }
+            return module.exports.handleReply({ handleReply: replyContext, api, event });
+        }
+    }
+};
+
+// --- Hàm xử lý reply từ tin nhắn list_manage ---
+module.exports.handleReply = async function({ handleReply: replyContext, api, event }) {
+    const { threadID, messageID, senderID, body } = event;
+
+    // Quyền đã được kiểm tra ở handleEvent trước đó, nhưng có thể thêm lại để đảm bảo hơn
+    if (!global.config.ADMINBOT.includes(senderID)) {
+        return api.sendMessage('🚫 Bạn không đủ quyền để thực hiện hành động này!', threadID, messageID);
+    }
+
+    const sendMessageReply = (msg, callback) => api.sendMessage(msg, threadID, callback, messageID);
+    const { type } = replyContext; // Không cần currentRentData vì sẽ dùng `data` global
+
+    if (type !== 'list_manage') return;
+
+    const messageBodyParts = body.toLowerCase().split(' ');
+    const action = messageBodyParts[0];
+    // const index = parseInt(action); // Không cần dòng này nữa vì action có thể là chữ
+
+    try {
+        switch (action) {
+            case 'del': {
+                const deleteIndices = messageBodyParts.slice(1).map(Number).filter(n => !isNaN(n) && n >= 1 && n <= data.length); // Dùng data global
+                if (deleteIndices.length === 0) return sendMessageReply('❎ Vui lòng nhập số thứ tự hợp lệ để xóa. ');
+
+                let deletedCount = 0;
+                let notifiedThreads = [];
+                // Sắp xếp giảm dần để splice không ảnh hưởng đến index
+                deleteIndices.sort((a, b) => b - a).forEach(stt => {
+                    const entryToDelete = data[stt - 1];
+                    if (entryToDelete) {
+                        notifiedThreads.push(entryToDelete); // Lưu lại để thông báo sau
+                        data.splice(stt - 1, 1); // Xóa khỏi data global
+                        deletedCount++;
+                    }
+                });
+                saveData(); // Lưu lại sau khi xóa
+
+                sendMessageReply(`✅ Đã xóa thành công **${deletedCount}** mục đã chọn! `);
+                // Gửi thông báo đến các nhóm bị xóa
+                for (const entry of notifiedThreads) {
+                    try {
+                        await api.sendMessage(`🚫 **Thông báo từ Admin:**\n\nNhóm của bạn đã bị gỡ khỏi danh sách thuê bot. Dữ liệu đã bị xóa. Vui lòng liên hệ Admin nếu có thắc mắc. `, entry.t_id);
+                    } catch (e) {
+                        console.error(`⚠️ Lỗi khi thông báo nhóm bị xóa (${entry.t_id}):`, e);
+                    }
+                }
+                break;
+            }
+
+            case 'out': {
+                const outIndices = messageBodyParts.slice(1).map(Number).filter(n => !isNaN(n) && n >= 1 && n <= data.length); // Dùng data global
+                if (outIndices.length === 0) return sendMessageReply('❎ Vui lòng nhập số thứ tự hợp lệ để bot out nhóm. ');
+
+                for (const stt of outIndices.sort((a, b) => a - b)) {
+                    const targetEntry = data[stt - 1];
+                    if (targetEntry) {
+                        const targetThread = targetEntry.t_id;
+                        try {
+                            await api.removeUserFromGroup(api.getCurrentUserID(), targetThread);
+                            sendMessageReply(`✅ Đã out khỏi nhóm **${targetThread}** theo yêu cầu.`);
+                            // Xóa dữ liệu thuê sau khi out
+                            data = data.filter(entry => entry.t_id !== targetThread);
+                        } catch (error) {
+                            sendMessageReply(`❌ Lỗi khi out khỏi nhóm **${targetThread}**: ${error.message}`);
+                        }
+                    }
+                }
+                saveData(); // Lưu lại sau khi out
+                break;
+            }
+
+            case 'giahan': {
+                const sttToGiaHan = parseInt(messageBodyParts[1]);
+                const newEndDate = messageBodyParts[2]; // Đây là DD/MM/YYYY
+
+                if (isNaN(sttToGiaHan) || sttToGiaHan < 1 || sttToGiaHan > data.length || !isValidDate(newEndDate)) {
+                    return sendMessageReply('❎ Cú pháp gia hạn không đúng hoặc ngày không hợp lệ!\nCách dùng: `giahan <STT> <DD/MM/YYYY mới>`. ');
+                }
+
+                const entryToExtend = data[sttToGiaHan - 1]; // Truy cập trực tiếp data global
+                if (entryToExtend) {
+                    entryToExtend.time_end = newEndDate;
+                    // entryToExtend.time_start = moment.tz(TIMEZONE).format('DD/MM/YYYY'); // Không cần cập nhật ngày bắt đầu khi gia hạn
+
+                    sendMessageReply(`✅ Gia hạn nhóm **${entryToExtend.t_id}** thành công đến **${newEndDate}**! `);
+                    try {
+                        await api.sendMessage(`🔔 **Thông báo từ Admin:**\n\nNhóm của bạn đã được gia hạn thuê bot đến ngày **${newEndDate}**! `, entryToExtend.t_id);
+                    } catch (e) {
+                        console.error(`⚠️ Lỗi khi thông báo gia hạn nhóm (${entryToExtend.t_id}):`, e);
+                    }
+                } else {
+                    sendMessageReply('❎ Không tìm thấy mục cần gia hạn. ');
+                }
+                break;
+            }
+
+            case 'removekey': {
+                const sttToRemoveKey = parseInt(messageBodyParts[1]);
+                if (isNaN(sttToRemoveKey) || sttToRemoveKey < 1 || sttToRemoveKey > data.length) {
+                    return sendMessageReply('❎ Vui lòng nhập số thứ tự hợp lệ để xóa key. ');
+                }
+                const entryToUpdate = data[sttToRemoveKey - 1]; // Truy cập trực tiếp data global
+                if (entryToUpdate) {
+                    const oldKey = entryToUpdate.key;
+                    entryToUpdate.key = null;
+                    sendMessageReply(`✅ Đã xóa key **${oldKey || 'trước đó không có'}** của nhóm **${entryToUpdate.t_id}** thành công! `);
+                } else {
+                    sendMessageReply('❎ Không tìm thấy mục cần xóa key. ');
+                }
+                break;
+            }
+
+            default:
+                // Nếu người dùng reply bằng STT để xem chi tiết
+                const index = parseInt(action);
+                if (!isNaN(index) && index >= 1 && index <= data.length) {
+                    const selectedEntry = data[index - 1]; // Truy cập trực tiếp data global
+
+                    const timeEndMoment = moment(selectedEntry.time_end, 'DD/MM/YYYY');
+                    const nowMoment = moment().tz(TIMEZONE);
+                    const isExpired = timeEndMoment.isBefore(nowMoment, 'day');
+
+                    const duration = moment.duration(timeEndMoment.diff(nowMoment));
+                    const daysLeft = duration.days();
+                    const hoursLeft = duration.hours();
+                    const minutesLeft = duration.minutes();
+                    const status = isExpired ? 'Đã Hết Hạn ❌' : 'Còn Hạn ✅';
+
+                    const threadName = global.data.threadName.get(selectedEntry.t_id) || (await api.getThreadInfo(selectedEntry.t_id).then(t => t.threadName).catch(() => `TID: ${selectedEntry.t_id}`));
+                    const userName = global.data.userName.get(selectedEntry.id) || (await api.getUserInfo(selectedEntry.id).then(u => u[selectedEntry.id]?.name).catch(() => `UID: ${selectedEntry.id}`));
+
+                    let userAvatar;
+                    try {
+                        userAvatar = await streamURL(`https://graph.facebook.com/${selectedEntry.id}/picture?height=720&width=720&access_token=6628568379%7Cc1e620fa708a1d5696fb991c1bde5662`);
+                    } catch (e) {
+                        console.error("⚠️ Lỗi khi tải avatar người thuê:", e);
+                        userAvatar = null;
+                    }
+
+                    sendMessageReply({
+                        body: `✨ **THÔNG TIN CHI TIẾT THUÊ BOT** ✨\n` +
+                              `──────────────────\n` +
+                              `👉 **Nhóm:** ${threadName}\n` +
+                              `👤 **Người thuê:** ${userName}\n` +
+                              `🗓️ **Ngày thuê:** ${selectedEntry.time_start}\n` +
+                              `⏳ **Hết hạn:** ${selectedEntry.time_end}\n` +
+                              `📝 **Tình trạng:** ${status}\n` +
+                              `⏰ **Còn lại:** ${isExpired ? 'Đã hết hạn' : `${daysLeft} ngày ${hoursLeft} giờ ${minutesLeft} phút`}\n` +
+                              `🔑 **Key:** ${selectedEntry.key || 'Chưa có'}\n` +
+                              `🔗 **TID:** ${selectedEntry.t_id}`,
+                        attachment: userAvatar ? [userAvatar] : []
+                    });
+                } else {
+                    sendMessageReply('❎ Lệnh không hợp lệ! Vui lòng reply "del <STT>", "out <STT>", "giahan <STT> <DD/MM/YYYY mới>", "removekey <STT>" hoặc số STT để xem chi tiết.');
+                }
+                break;
+        }
+    } catch (e) {
+        console.error("⚠️ Lỗi trong handleReply lệnh rent:", e);
+        sendMessageReply("❌ Đã xảy ra sự cố không mong muốn khi xử lý phản hồi. Vui lòng thử lại sau! ");
+    }
+    saveData(); // Lưu dữ liệu sau mỗi thao tác trong handleReply
+};
+
+// --- Cron job tự động kiểm tra hết hạn (KHÔNG ĐỔI BIỆT DANH) ---
+// Chạy vào 00:00 hàng ngày
+cron.schedule('0 0 * * *', async () => {
+    console.log('🔄 Đang kiểm tra trạng thái thuê bot và thông báo hết hạn...');
+    if (global.api) {
+        for (const entry of data) {
+            const threadID = entry.t_id;
+            const timeEndMoment = moment(entry.time_end, 'DD/MM/YYYY');
+            const nowMoment = moment().tz(TIMEZONE);
+            const isExpired = timeEndMoment.isBefore(nowMoment, 'day');
+
+            if (isExpired && entry.notifiedExpired !== true) { // Nếu đã hết hạn và chưa thông báo
+                try {
+                    // Gửi thông báo hết hạn tới nhóm
+                    await global.api.sendMessage(`⚠️ **BOT HẾT HẠN!** ⚠️\n\nBot đã hết hạn thuê trong nhóm bạn từ ngày **${entry.time_end}**. Vui lòng liên hệ Admin (**${global.config.ADMINBOT[0]}**) để gia hạn dịch vụ!`, threadID);
+                    entry.notifiedExpired = true; // Đánh dấu đã thông báo
+                    console.log(`✅ Đã gửi thông báo hết hạn cho nhóm ${threadID}.`);
+                } catch (error) {
+                    console.error(`❌ Lỗi khi gửi thông báo hết hạn cho nhóm ${threadID}:`, error);
+                }
+            } else if (!isExpired && entry.notifiedExpired === true) {
+                // Nếu nhóm được gia hạn lại, reset trạng thái thông báo
+                entry.notifiedExpired = false;
+            }
+        }
+        saveData(); // Lưu lại dữ liệu sau khi kiểm tra và cập nhật trạng thái
+    } else {
+        console.error("❌ Lỗi: global.api chưa được gán, không thể chạy cron job checkExpiredGroups.");
+    }
+});

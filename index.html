@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>qh</title>
+    <link href="https://fonts.googleapis.com/css2?family=varela+round&display=swap" rel="stylesheet">
+    <style>
+        /* base styles */
+        body {
+            margin: 0;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background-color: #f0f0f0; /* nền sáng */
+            font-family: ui-rounded, 'varela round', -apple-system, blinkmacsystemfont, 'segoe ui', 'roboto', 'oxygen', 'ubuntu', 'cantarell', 'fira sans', 'droid sans', 'helvetica neue', arial, sans-serif;
+            color: #333;
+            flex-direction: column; /* để căn giữa cả 2 dòng chữ */
+        }
+
+        /* main animated text (designed by qh / languages) */
+        .animated-text {
+            font-size: 8vw; /* kích thước chữ lớn, theo màn hình */
+            font-weight: 600; /* độ dày */
+            color: transparent; /* chữ trong suốt để dùng gradient */
+            background: linear-gradient(to right, #007bff, #6610f2, #fd7e14, #ffc107, #28a745, #17a2b8); /* gradient màu */
+            -webkit-background-clip: text; /* cắt gradient theo hình dạng chữ */
+            background-clip: text;
+            white-space: nowrap; /* đảm bảo chữ không bị ngắt dòng */
+            opacity: 0; /* bắt đầu ẩn đi */
+            transform: scale(0.9); /* bắt đầu hơi nhỏ */
+            transition: opacity 0.5s ease-in-out, transform 0.5s ease-in-out; /* hiệu ứng chuyển động mượt mà */
+            text-shadow: 0 4px 15px rgba(0, 0, 0, 0.1); /* thêm bóng đổ nhẹ cho chữ */
+            text-align: center; /* căn giữa chữ */
+        }
+
+        /* sub text (fb.com/qhdz05) */
+        .sub-text {
+            font-size: 2.5vw; /* kích thước nhỏ hơn */
+            font-weight: 500;
+            color: #6c757d; /* màu xám nhẹ */
+            opacity: 0;
+            transform: translateY(10px); /* bắt đầu hơi dịch xuống */
+            transition: opacity 0.5s ease-in-out, transform 0.5s ease-in-out;
+            margin-top: 1vw; /* đã điều chỉnh khoảng cách này */
+        }
+
+        /* animations */
+        .animated-text.show {
+            opacity: 1;
+            transform: scale(1);
+        }
+
+        .animated-text.hide {
+            opacity: 0;
+            transform: scale(0.9);
+        }
+
+        .sub-text.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .sub-text.hide {
+            opacity: 0;
+            transform: translateY(10px);
+        }
+    </style>
+</head>
+<body>
+    <div id="displayText" class="animated-text"></div>
+    <div id="subText" class="sub-text"></div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const displayText = document.getElementById('displayText');
+            const subText = document.getElementById('subText');
+            
+            // hàm chỉ viết hoa chữ cái đầu tiên của cả câu/cụm từ
+            // Đã chỉnh sửa để giữ nguyên ký tự và casing của phần còn lại của chuỗi
+            function capitalizeFirstLetter(str) {
+                if (!str) return '';
+                const firstChar = str.charAt(0);
+                // Nếu ký tự đầu tiên là chữ cái, viết hoa nó. Ngược lại, giữ nguyên.
+                if (firstChar.match(/[a-zA-Z]/)) {
+                    return firstChar.toUpperCase() + str.slice(1); // Giữ nguyên casing của phần còn lại
+                }
+                return str; // Nếu không phải chữ cái (ví dụ: ký tự đặc biệt, số), giữ nguyên chuỗi
+            }
+
+            // từ điển chứa các bản dịch (chỉ còn các câu "xin chào" và xen kẽ chữ tượng hình, chữ Latinh)
+            const fixedTranslations = [
+                { main: "designed by qh", sub: "fb.com/qhdz05" }, 
+                { main: "xin chào", lang: "vi" },
+                { main: "hello", lang: "en" }
+            ];
+
+            const randomTranslations = [
+                // Ngôn ngữ có cả chữ tượng hình và Latinh
+                { main: "你好", lang: "zh" }, // Tiếng Trung
+                { main: "Ni hao", lang: "zh" },
+                { main: "안녕하세요", lang: "ko" }, // Tiếng Hàn
+                { main: "Annyeonghaseyo", lang: "ko" },
+                { main: "こんにちは", lang: "ja" }, // Tiếng Nhật
+                { main: "Konnichiwa", lang: "ja" },
+                { main: "สวัสดี", lang: "th" }, // Tiếng Thái
+                { main: "Sawatdee", lang: "th" },
+                { main: "नमस्ते", lang: "hi" }, // Tiếng Hindi
+                { main: "Namaste", lang: "hi" },
+                { main: "Привет", lang: "ru" }, // Tiếng Nga
+                { main: "Privet", lang: "ru" },
+                { main: "مرحبا", lang: "ar" }, // Tiếng Ả Rập
+                { main: "Marhaba", lang: "ar" },
+                { main: "שלום", lang: "he" }, // Tiếng Do Thái
+                { main: "Shalom", lang: "he" },
+                { main: "سلام", lang: "fa" }, // Tiếng Farsi
+                { main: "Salam", lang: "fa" },
+                { main: "Γεια σας", lang: "el" }, // Tiếng Hy Lạp
+                { main: "Geia sas", lang: "el" },
+
+                // Các ngôn ngữ chỉ có dạng Latinh (chỉ "Xin chào")
+                { main: "bonjour", lang: "fr" },
+                { main: "hola", lang: "es" },
+                { main: "hallo", lang: "de" },
+                { main: "ciao", lang: "it" }, 
+                { main: "olá", lang: "pt" },
+                { main: "merhaba", lang: "tr" },
+                { main: "cześć", lang: "pl" },
+                { main: "hej", lang: "sv" },
+                { main: "halo", lang: "id" }, // Tiếng Indonesia/Malay
+                { main: "kumusta", lang: "fil" }, // Tiếng Philippines
+                { main: "jambo", lang: "sw" }, // Tiếng Swahili
+                { main: "hei", lang: "fi" }, // Tiếng Phần Lan
+                { main: "hei", lang: "no" }, // Tiếng Na Uy
+                { main: "hej", lang: "da" }, // Tiếng Đan Mạch
+                { main: "salut", lang: "ro" }, // Tiếng Romania
+                { main: "szia", lang: "hu" }  // Tiếng Hungary
+            ];
+
+            // trộn ngẫu nhiên mảng randomTranslations
+            function shuffleArray(array) {
+                for (let i = array.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [array[i], array[j]] = [array[j], array[i]];
+                }
+                return array;
+            }
+
+            const translations = fixedTranslations.concat(shuffleArray(randomTranslations));
+            
+            let currentItemIndex = 0; // bắt đầu từ mục đầu tiên (Designed by qh)
+
+            // hàm hiển thị cả chữ chính và chữ phụ
+            function showContent(mainText, subTextContent = '') {
+                displayText.textContent = capitalizeFirstLetter(mainText); 
+                displayText.classList.remove('hide');
+                displayText.classList.add('show');
+
+                if (subTextContent) {
+                    subText.textContent = subTextContent;
+                    subText.classList.remove('hide');
+                    subText.classList.add('show');
+                } else {
+                    // nếu không có subText, ẩn nó đi
+                    subText.classList.remove('show');
+                    subText.classList.add('hide');
+                }
+            }
+
+            // hàm ẩn cả chữ chính và chữ phụ
+            function hideContent() {
+                displayText.classList.remove('show');
+                displayText.classList.add('hide');
+                subText.classList.remove('show');
+                subText.classList.add('hide');
+            }
+
+            // hàm chuyển đổi nội dung
+            function cycleContent() {
+                hideContent(); 
+
+                setTimeout(() => {
+                    currentItemIndex = (currentItemIndex + 1) % translations.length;
+                    const nextItem = translations[currentItemIndex];
+                    showContent(nextItem.main, nextItem.sub); // truyền cả main và sub text
+                }, 700); 
+            }
+
+            // bắt đầu chuỗi hiệu ứng khi trang tải xong
+            showContent(translations[currentItemIndex].main, translations[currentItemIndex].sub);
+
+            // thiết lập interval để tự động chuyển đổi nội dung
+            setInterval(cycleContent, 3000); 
+        });
+    </script>
+</body>
+</html>
